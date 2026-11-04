@@ -164,6 +164,14 @@ class ARAP():
             tA2xA2_dense += 0.00000001 * np.identity(tA2xA2_dense.shape[0])
         self.tA2xA2: csr_matrix = sp.csr_matrix(tA2xA2_dense)
 
+        # Predškoláčik: both system matrices are fixed for the whole animation,
+        # so factorise them once instead of in every spsolve (three LU
+        # factorisations per frame were half of all render time).
+        # float64, as spsolve upcast to before.
+        self._solve1 = spla.factorized(sp.csc_matrix(self.tA1xA1, dtype=np.float64))
+        self._solve2 = spla.factorized(sp.csc_matrix(self.tA2xA2, dtype=np.float64))
+        self._edges = np.asarray(self.edge_vectors, dtype=np.float64).reshape(-1, 2)
+
         # revert np overflow warnings behavior
         np.seterr(**old_settings)
 
@@ -182,25 +190,24 @@ class ARAP():
         assert len(pins_xy) == self.pin_num
 
         self.b1: npt.NDArray[np.float64] = np.hstack([np.zeros([2 * self.edge_num], dtype=np.float64), self.w * pins_xy.reshape([-1, ])])
-        v1: npt.NDArray[np.float64] = spla.spsolve(self.tA1xA1, self.tA1 @ self.b1.T)
+        v1: npt.NDArray[np.float64] = self._solve1(self.tA1 @ self.b1.T)
 
+        # Rotate every old edge vector by its normalised (c, s), all at once:
+        # e1 = [[c, s], [-s, c]] @ e0, as the per-edge loop upstream did.
         T1: npt.NDArray[np.float64] = self.G @ v1
-        b2_top = np.empty([self.edge_num, 2], dtype=np.float64)
-        for idx, e0 in enumerate(self.edge_vectors):
-            c: np.float64 = T1[2*idx]
-            s: np.float64 = T1[2*idx + 1]
-            scale = 1.0 / np.sqrt(c * c + s * s)
-            c *= scale
-            s *= scale
-            T2 = np.asarray(((c, s), (-s, c)))  # create rotation matrix
-            e1 = np.dot(T2, e0)                 # and rotate old vector to get new
-            b2_top[idx] = e1
+        c = T1[0::2][:self.edge_num]
+        s = T1[1::2][:self.edge_num]
+        scale = 1.0 / np.sqrt(c * c + s * s)
+        c = c * scale
+        s = s * scale
+        ex, ey = self._edges[:, 0], self._edges[:, 1]
+        b2_top = np.column_stack((c * ex + s * ey, -s * ex + c * ey))
         b2 = np.vstack([b2_top, self.w * pins_xy])
         b2x = b2[:, 0]
         b2y = b2[:, 1]
 
-        v2x: npt.NDArray[np.float64] = spla.spsolve(self.tA2xA2, self.tA2 @ b2x)
-        v2y: npt.NDArray[np.float64] = spla.spsolve(self.tA2xA2, self.tA2 @ b2y)
+        v2x: npt.NDArray[np.float64] = self._solve2(self.tA2 @ b2x)
+        v2y: npt.NDArray[np.float64] = self._solve2(self.tA2 @ b2y)
 
         return np.vstack((v2x, v2y)).T
 

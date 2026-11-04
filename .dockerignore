@@ -1,0 +1,8 @@
+.git
+media
+tests
+examples/*
+!examples/config
+!examples/bvh
+torchserve
+**/__pycache__
