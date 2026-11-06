@@ -1,6 +1,6 @@
 """HTTP API of the Predškoláčik animator (Kresli a tancuj).
 
-  POST /animate?motion=dab&format=webp   multipart field `image` (PNG)
+  POST /animate?motion=dab&format=webp[&scene=luka]   multipart field `image` (PNG)
        -> image/gif (default) or image/webp
        401 bad key · 422 {"code":"no_figure"} · 503 {"code":"busy"}
   GET  /health
@@ -78,6 +78,10 @@ MOTIONS = {
 }
 DEFAULT_MOTION = 'dab'
 FORMATS = {'gif': 'image/gif', 'webp': 'image/webp'}
+# Backdrops for downloads (exported from the app's CSS by
+# scripts/export-dance-scenes.mjs in the predskolacik repo).
+SCENES_DIR = HERE / 'scenes'
+SCENES = {p.stem for p in SCENES_DIR.glob('*.png')}
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 models: Models | None = None
@@ -279,6 +283,33 @@ async def render_for_child(anno: Path, motion: str, fmt: str, request: Request |
         return data
 
 
+def with_scene(dance: Path, scene: str) -> bytes:
+    """The (transparent) dance composited onto a scene, cached next to it.
+
+    For the download: the stage shows the dance over a CSS backdrop, a saved
+    file should look the same. Opaque frames, so lossy WebP is the smaller
+    choice here.
+    """
+    from PIL import Image, ImageSequence
+
+    out = dance.with_name(f'{dance.stem}.{scene}.webp')
+    if out.exists():
+        return out.read_bytes()
+    anim = Image.open(dance)
+    backdrop = Image.open(SCENES_DIR / f'{scene}.png').convert('RGBA').resize(anim.size, Image.LANCZOS)
+    frames, durations = [], []
+    for frame in ImageSequence.Iterator(anim):
+        composed = backdrop.copy()
+        composed.alpha_composite(frame.convert('RGBA'))
+        frames.append(composed.convert('RGB'))
+        durations.append(frame.info.get('duration', anim.info.get('duration', 66)))
+    tmp = out.with_suffix(f'.{os.getpid()}.tmp')
+    frames[0].save(tmp, format='WEBP', save_all=True, append_images=frames[1:],
+                   duration=durations, loop=0, quality=80, method=4)
+    os.replace(tmp, out)
+    return out.read_bytes()
+
+
 # --- Background pre-rendering ---------------------------------------------------------
 
 prerender_queue: collections.deque[tuple[Path, str, str]] = collections.deque()
@@ -337,6 +368,7 @@ async def animate(
     image: UploadFile = File(...),
     motion: str = Query(DEFAULT_MOTION),
     format: str = Query('gif'),
+    scene: str | None = Query(None),
     x_animator_key: str = Header(''),
 ):
     global waiting, active
@@ -346,16 +378,23 @@ async def animate(
         return error(400, 'bad_motion')
     if format not in FORMATS:
         return error(400, 'bad_format')
+    if scene is not None and (scene not in SCENES or format != 'webp'):
+        return error(400, 'bad_scene')
     data = await image.read(MAX_IMAGE_BYTES + 1)
     if not data or len(data) > MAX_IMAGE_BYTES:
         return error(400, 'bad_image')
+
+    async def answer(dance: Path, video: bytes) -> Response:
+        if scene is not None:
+            video = await asyncio.to_thread(with_scene, dance, scene)
+        return Response(video, media_type=FORMATS[format])
 
     # Already rendered (by an earlier request or in the background): no
     # queue, no slot.
     ready = anno_dir(data) / f'{motion}.{format}'
     if ready.exists():
         os.utime(ready.parent)
-        return Response(ready.read_bytes(), media_type=FORMATS[format])
+        return await answer(ready, ready.read_bytes())
 
     if waiting >= MAX_WAITING:
         return error(503, 'busy', **{'Retry-After': '20'})
@@ -379,7 +418,7 @@ async def animate(
         log.info('animated (%s, %s) in %.1f s (annotate %.1f s), %d kB',
                  motion, format, time.monotonic() - started, t_anno, len(video) // 1024)
         queue_prerender(anno, format, motion)
-        return Response(video, media_type=FORMATS[format])
+        return await answer(anno / f'{motion}.{format}', video)
     except ClientGone:
         log.info('client left during %s after %.1f s', motion, time.monotonic() - started)
         return Response(status_code=499)

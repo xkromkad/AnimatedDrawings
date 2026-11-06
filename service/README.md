@@ -23,6 +23,7 @@ On the Oracle VM (1 Ampere core):
 **`server.py`** is the FastAPI app.
 
 - `POST /animate?motion=<name>&format=gif|webp` takes a multipart `image`. It returns `image/gif` (the default) or an animated `image/webp`. The app asks for WebP: it has real alpha around the figure and is much smaller.
+- `&scene=<id>` (WebP only) composites the dance onto one of the backdrops in `scenes/`. This is the app's "Stiahnuť", so the saved file looks like the stage. It takes ~4 s on the VM, then comes from the cache. The backdrops are 2× PNGs exported from the app's CSS by `scripts/export-dance-scenes.mjs` in the predskolacik repo. Re-export them after changing a scene there.
 - `GET /health`.
 - **Errors:** `401` for a bad key, `422 {"code":"no_figure"}`, and `503 {"code":"busy"}` with `Retry-After`.
 - **Caching:** the rig is cached by image hash for an hour, and every rendered dance sits next to it. A dance that's already there is answered at once, without queueing.
