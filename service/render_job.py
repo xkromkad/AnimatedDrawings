@@ -26,24 +26,61 @@ MAX_SECONDS = 10.0
 
 
 def sample_frames() -> None:
-    """Render at ~FPS and at most MAX_SECONDS (the result loops).
+    """Animate at ~FPS for at most MAX_SECONDS (the result loops).
 
-    The BVH clips run at 30 or 100 fps for up to 28 s (up to 1007 frames),
-    which on the VM's one core is minutes. Stepping the scene clock by whole
-    BVH frames keeps every pose exact; only in-between poses are skipped.
+    The BVH clips run at 30 or 100 fps for up to 28 s (up to 1007 frames).
+    Keeping every n-th frame of the clip as it is loaded (and scaling its
+    frame time by n) means the retargeter, which precomputes every frame of
+    the clip, and the renderer both only touch frames that are shown; each
+    kept pose is exact. The controller then renders the clip as given.
     """
-    cls = video_render_controller.VideoRenderController
-    original = cls._set_frames_left_to_render_and_delta_t
+    from animated_drawings.model.bvh import BVH
 
-    def patched(self) -> None:
+    original = BVH.from_file.__func__
+
+    def from_file(cls, bvh_fn, start_frame_idx=0, end_frame_idx=None):
+        bvh = original(cls, bvh_fn, start_frame_idx, end_frame_idx)
+        step = max(1, round(1.0 / FPS / bvh.frame_time))
+        keep = max(1, min(-(-bvh.frame_max_num // step), int(MAX_SECONDS / (bvh.frame_time * step))))
+        bvh.pos_data = bvh.pos_data[::step][:keep]
+        bvh.rot_data = bvh.rot_data[::step][:keep]
+        bvh.frame_max_num = keep
+        bvh.frame_time *= step
+        bvh.apply_frame(0)
+        return bvh
+
+    BVH.from_file = classmethod(from_file)
+
+
+def cache_joint_map(anno: Path) -> None:
+    """Reuse the joint -> triangles map across the dances of one drawing.
+
+    It is a pure-Python BFS over every mask pixel (~4 s on the VM) and
+    depends only on the drawing and its skeleton, never on the motion. The
+    original also flips each skeleton joint's y in place (later steps read
+    it), so a cache hit repeats exactly that.
+    """
+    import os
+    import pickle
+    from animated_drawings.model.animated_drawing import AnimatedDrawing
+
+    cache = anno / 'joint_map.pkl'
+    original = AnimatedDrawing._initialize_joint_to_triangles_dict
+
+    def cached(self) -> None:
+        if cache.exists():
+            for joint in self.char_cfg.skeleton:
+                joint['loc'][1] = 1 - joint['loc'][1]
+            with open(cache, 'rb') as f:
+                self.joint_to_tri_v_idx = pickle.load(f)
+            return
         original(self)
-        frame_time = self.delta_t
-        step = max(1, round(1.0 / FPS / frame_time))
-        self.delta_t = frame_time * step
-        frames = -(-self.frames_left_to_render // step)
-        self.frames_left_to_render = min(frames, max(1, int(MAX_SECONDS / self.delta_t)))
+        tmp = cache.with_suffix(f'.{os.getpid()}.tmp')
+        with open(tmp, 'wb') as f:
+            pickle.dump(self.joint_to_tri_v_idx, f)
+        os.replace(tmp, cache)
 
-    cls._set_frames_left_to_render_and_delta_t = patched
+    AnimatedDrawing._initialize_joint_to_triangles_dict = cached
 
 
 def write_webp_instead(webp_path: Path) -> None:
@@ -66,6 +103,7 @@ def main(anno_dir: str, motion: str, retarget: str, out_path: str) -> None:
     anno = Path(anno_dir)
     out = Path(out_path)
     sample_frames()
+    cache_joint_map(anno)
     if out.suffix == '.webp':
         write_webp_instead(out)
         out_path = str(out.with_suffix('.gif'))

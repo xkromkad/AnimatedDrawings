@@ -14,6 +14,17 @@ import scipy.sparse as sp
 csr_matrix = sp._csr.csr_matrix  # for typing  # pyright: ignore[reportPrivateUsage]
 
 
+def _factorise(m: csr_matrix, name: str):
+    """A solve function for the sparse system m (float64, as spsolve upcast to)."""
+    m = sp.csc_matrix(m, dtype=np.float64)
+    while True:
+        try:
+            return spla.splu(m).solve
+        except RuntimeError:  # "Factor is exactly singular"
+            logging.info(f'{name} is singular. perturbing...')
+            m = m + 0.00000001 * sp.identity(m.shape[0], dtype=np.float64, format='csc')
+
+
 class ARAP():
     """
     Implementation of:
@@ -147,33 +158,21 @@ class ARAP():
         self.tA2: csr_matrix = sp.csr_matrix(self.A2.transpose())
         self.G: csr_matrix = sp.csr_matrix(G)
 
-        # perturbing singular matrix and calling det can trigger overflow warning- ignore it
-        old_settings = np.seterr(over='ignore')
-
-        # ensure tA1xA1 matrix isn't singular and cache sparse repsentation
-        tA1xA1_dense: npt.NDArray[np.float32] = self.tA1 @ self.A1
-        while np.linalg.det(tA1xA1_dense) == 0.0:
-            logging.info('tA1xA1 is singular. perturbing...')
-            tA1xA1_dense += 0.00000001 * np.identity(tA1xA1_dense.shape[0])
-        self.tA1xA1: csr_matrix = sp.csr_matrix(tA1xA1_dense)
-
-        # ensure tA2xA2 matrix isn't singular and cache sparse repsentation
-        tA2xA2_dense: npt.NDArray[np.float32] = self.tA2 @ self.A2
-        while np.linalg.det(tA2xA2_dense) == 0.0:
-            logging.info('tA2xA2 is singular. perturbing...')
-            tA2xA2_dense += 0.00000001 * np.identity(tA2xA2_dense.shape[0])
-        self.tA2xA2: csr_matrix = sp.csr_matrix(tA2xA2_dense)
-
         # Predškoláčik: both system matrices are fixed for the whole animation,
-        # so factorise them once instead of in every spsolve (three LU
+        # so factorise them once here instead of in every spsolve (three LU
         # factorisations per frame were half of all render time).
-        # float64, as spsolve upcast to before.
-        self._solve1 = spla.factorized(sp.csc_matrix(self.tA1xA1, dtype=np.float64))
-        self._solve2 = spla.factorized(sp.csc_matrix(self.tA2xA2, dtype=np.float64))
+        #
+        # Upstream tested `np.linalg.det(dense) == 0.0` first and nudged the
+        # diagonal by 1e-8 until it was not. On the ~5000x5000 matrix of a
+        # child's drawing that cost 14 s of a 36 s render on the VM, and a
+        # determinant that size underflows to 0.0 even for a regular matrix,
+        # so it was no real test. The LU factorisation reports actual
+        # singularity; the same 1e-8 nudge is applied only then.
+        self.tA1xA1: csr_matrix = sp.csr_matrix(self.tA1 @ self.A1)
+        self.tA2xA2: csr_matrix = sp.csr_matrix(self.tA2 @ self.A2)
+        self._solve1 = _factorise(self.tA1xA1, 'tA1xA1')
+        self._solve2 = _factorise(self.tA2xA2, 'tA2xA2')
         self._edges = np.asarray(self.edge_vectors, dtype=np.float64).reshape(-1, 2)
-
-        # revert np overflow warnings behavior
-        np.seterr(**old_settings)
 
     def solve(self, pins_xy_: npt.NDArray[np.float32]) -> npt.NDArray[np.float64]:
         """

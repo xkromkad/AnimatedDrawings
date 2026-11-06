@@ -76,7 +76,9 @@ ENV PYTHONPATH=/app:/app/service \
     PYOPENGL_PLATFORM=osmesa \
     ANIMATOR_MODELS=/models \
     ANIMATOR_WORK=/tmp \
-    OMP_NUM_THREADS=2
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1
 
 RUN useradd --uid 10001 --create-home animator \
  && mkdir -p /tmp/animator && chown animator /tmp/animator

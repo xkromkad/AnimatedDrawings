@@ -44,8 +44,17 @@ class Models:
         root = Path(os.environ.get('ANIMATOR_MODELS', '/models'))
         det_cfg, det_ckpt = _model_files(root / 'detector')
         pose_cfg, pose_ckpt = _model_files(root / 'pose')
+        detector = init_detector(det_cfg, det_ckpt, device='cpu')
+        # The detector was trained at 1333x800. A drawing is one big figure
+        # on white, and at 800x480 the scores and boxes match within a few
+        # pixels (annotate.py pads the box) while detection takes 7 s
+        # instead of 18 s on the VM's core.
+        w, h = (int(x) for x in os.environ.get('ANIMATOR_DET_SCALE', '800x480').split('x'))
+        for step in detector.cfg.data.test.pipeline:
+            if 'img_scale' in step:
+                step['img_scale'] = (w, h)
         return cls(
-            detector=init_detector(det_cfg, det_ckpt, device='cpu'),
+            detector=detector,
             pose_model=init_pose_model(pose_cfg, pose_ckpt, device='cpu'),
         )
 

@@ -26,6 +26,7 @@ DETECTION_THRESHOLD = 0.5
 # Below this mean keypoint confidence the rig is guesswork and the dance looks
 # broken; telling the child to draw the whole figure is the better answer.
 MIN_POSE_SCORE = 0.2
+BOX_MARGIN = 0.08
 
 
 class NoFigure(Exception):
@@ -49,7 +50,13 @@ def image_to_annotations(img: np.ndarray, out_dir: Path, models: Models) -> None
     detections.sort(key=lambda d: d['score'], reverse=True)
 
     h, w = img.shape[:2]
-    l, t, r, b = [round(x) for x in detections[0]['bbox']]
+    l, t, r, b = detections[0]['bbox']
+    # A margin around the box: at the reduced detection scale (models.py) a
+    # box can clip a hand or the top of the head by a few percent, and the
+    # extra white around the figure costs nothing (segment() keeps only the
+    # figure).
+    mx, my = (r - l) * BOX_MARGIN, (b - t) * BOX_MARGIN
+    l, t, r, b = [round(x) for x in (l - mx, t - my, r + mx, b + my)]
     l, t, r, b = max(l, 0), max(t, 0), min(r, w), min(b, h)
     if r - l < 16 or b - t < 16:
         raise NoFigure('bounding box too small')
